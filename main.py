@@ -51,7 +51,10 @@ async def incoming_call(request: Request):
 # ------------------------------------------------------------------ #
 @app.websocket("/ws/stream")
 async def stream_endpoint(websocket: WebSocket):
+    client_host = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"WebSocket接続試行 from={client_host}")
     await websocket.accept()
+    logger.info(f"WebSocket接続確立 from={client_host}")
     session = CallSession(websocket, openai_client)
     try:
         await session.run()
