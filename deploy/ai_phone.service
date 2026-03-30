@@ -1,0 +1,25 @@
+# AI受電システム PoC — systemd サービス定義
+# 使用方法:
+#   sudo cp deploy/ai_phone.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable ai_phone
+#   sudo systemctl start ai_phone
+#
+# ログ確認:
+#   sudo journalctl -u ai_phone -f
+
+[Unit]
+Description=AI受電システム PoC (FastAPI + Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI_phone_poc
+EnvironmentFile=/home/ubuntu/AI_phone_poc/.env
+ExecStart=/home/ubuntu/AI_phone_poc/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
