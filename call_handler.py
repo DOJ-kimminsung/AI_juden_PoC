@@ -51,7 +51,7 @@ class CallSession:
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         try:
             async with websockets.connect(
-                DEEPGRAM_URL, additional_headers=headers
+                DEEPGRAM_URL, extra_headers=headers
             ) as dg_ws:
                 self.deepgram_ws = dg_ws
                 logger.info("Deepgram 接続完了")
