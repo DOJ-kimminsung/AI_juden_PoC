@@ -38,11 +38,9 @@ async def incoming_call(request: Request):
     host = request.headers.get("host", "localhost")
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Connect>
-        <Stream url="wss://{host}/ws/stream"/>
-    </Connect>
+    <Say language="ja-JP">こんにちは。テストです。TwiMLが正常に動作しています。</Say>
 </Response>"""
-    logger.info(f"着信 → Stream開始 host={host}")
+    logger.info(f"着信（Sayテスト） host={host}")
     return Response(content=twiml, media_type="application/xml")
 
 
