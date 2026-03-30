@@ -51,7 +51,7 @@ class CallSession:
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         try:
             async with websockets.connect(
-                DEEPGRAM_URL, extra_headers=headers
+                DEEPGRAM_URL, additional_headers=headers
             ) as dg_ws:
                 self.deepgram_ws = dg_ws
                 logger.info("Deepgram 接続完了")
@@ -168,6 +168,15 @@ class CallSession:
                     }
                 )
                 await asyncio.sleep(0)  # 他タスクに制御を返す
+
+            # 音声送信完了をTwilioに通知
+            await self.ws.send_json(
+                {
+                    "event": "mark",
+                    "streamSid": self.stream_sid,
+                    "mark": {"name": "audio_end"},
+                }
+            )
 
         except Exception as e:
             logger.error(f"TTS エラー: {e}")
