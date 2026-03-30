@@ -36,11 +36,14 @@ openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
     host = request.headers.get("host", "localhost")
-    twiml = """<?xml version="1.0" encoding="UTF-8"?>
+    host = request.headers.get("host", "localhost")
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Hello. This is a test. The system is working correctly.</Say>
+    <Connect>
+        <Stream url="wss://{host}/ws/stream"/>
+    </Connect>
 </Response>"""
-    logger.info(f"着信（英語Sayテスト）")
+    logger.info(f"着信 → Stream開始 host={host}")
     return Response(content=twiml, media_type="application/xml")
 
 
