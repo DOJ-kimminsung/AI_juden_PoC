@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import os
+from typing import Optional
 
 import websockets
 from fastapi import WebSocket
@@ -32,22 +33,28 @@ DEEPGRAM_URL = (
 TTS_MODEL = "tts-1"
 TTS_VOICE = "nova"    # 日本語に自然に対応する声
 LLM_MODEL = "gpt-4o"
-AUDIO_CHUNK_SIZE = 3200  # Twilioに送る1チャンクのサイズ (bytes, mulaw)
+# mulaw 8kHz: 8000 samples/sec × 1 byte/sample × 0.2s = 1600 bytes (PCM換算3200)
+# Twilio推奨バッファに合わせて200ms相当のチャンクサイズを使用
+AUDIO_CHUNK_SIZE = 3200  # bytes (mulaw, 約200ms相当)
+
+# PERF-001: 会話履歴の最大保持ターン数（超過分は古い順に破棄）
+MAX_HISTORY_TURNS = 10
 
 
 class CallSession:
-    def __init__(self, websocket: WebSocket, client: AsyncOpenAI):
+    def __init__(self, websocket: WebSocket, client: AsyncOpenAI) -> None:
         self.ws = websocket
         self.client = client
-        self.stream_sid: str | None = None
-        self.deepgram_ws = None
-        self.conversation: list[dict] = []
-        self.is_ai_speaking = False
+        self.stream_sid: Optional[str] = None
+        self.deepgram_ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.conversation: list[dict[str, str]] = []
+        self.is_ai_speaking: bool = False
+        self._speak_lock = asyncio.Lock()  # LOGIC-001: レースコンディション防止
 
     # ------------------------------------------------------------------ #
     #  エントリーポイント                                                   #
     # ------------------------------------------------------------------ #
-    async def run(self):
+    async def run(self) -> None:
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         try:
             async with websockets.connect(
@@ -55,10 +62,17 @@ class CallSession:
             ) as dg_ws:
                 self.deepgram_ws = dg_ws
                 logger.info("Deepgram 接続完了")
-                await asyncio.gather(
-                    self._handle_twilio(),
-                    self._handle_deepgram(),
-                )
+                # LOGIC-003: タスクを明示管理し、一方が終了したら他方もキャンセル
+                tasks = [
+                    asyncio.create_task(self._handle_twilio()),
+                    asyncio.create_task(self._handle_deepgram()),
+                ]
+                try:
+                    await asyncio.gather(*tasks)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as e:
             logger.error(f"CallSession エラー: {e}")
 
@@ -117,8 +131,13 @@ class CallSession:
     # ------------------------------------------------------------------ #
     #  GPT-4o で応答を生成し、TTSで返す                                     #
     # ------------------------------------------------------------------ #
-    async def _process_user_input(self, text: str):
+    async def _process_user_input(self, text: str) -> None:
         self.conversation.append({"role": "user", "content": text})
+
+        # PERF-001: 会話履歴の上限管理（古いターンを破棄してトークン超過を防止）
+        if len(self.conversation) > MAX_HISTORY_TURNS * 2:
+            self.conversation = self.conversation[-(MAX_HISTORY_TURNS * 2):]
+            logger.info(f"会話履歴を直近{MAX_HISTORY_TURNS}ターンに切り詰めました")
 
         try:
             response = await self.client.chat.completions.create(
@@ -141,47 +160,50 @@ class CallSession:
     # ------------------------------------------------------------------ #
     #  OpenAI TTS → mulaw変換 → Twilioへ送信                               #
     # ------------------------------------------------------------------ #
-    async def _speak(self, text: str):
+    async def _speak(self, text: str) -> None:
         if not self.stream_sid:
             return
 
-        self.is_ai_speaking = True
-        try:
-            tts_response = await self.client.audio.speech.create(
-                model=TTS_MODEL,
-                voice=TTS_VOICE,
-                input=text,
-                response_format="pcm",  # raw PCM 24kHz 16bit mono
-            )
-            pcm_data = tts_response.content
-            mulaw_data = pcm24k_to_mulaw8k(pcm_data)
+        # LOGIC-001: asyncio.Lock で排他制御（複数タスクの同時実行を防止）
+        # Lock を保持したまま TTS 送信全体を実行し、フラグの競合を排除する
+        async with self._speak_lock:
+            self.is_ai_speaking = True
+            try:
+                tts_response = await self.client.audio.speech.create(
+                    model=TTS_MODEL,
+                    voice=TTS_VOICE,
+                    input=text,
+                    response_format="pcm",  # raw PCM 24kHz 16bit mono
+                )
+                pcm_data = tts_response.content
+                mulaw_data = pcm24k_to_mulaw8k(pcm_data)
 
-            # チャンク送信（Twilioのバッファに合わせる）
-            for i in range(0, len(mulaw_data), AUDIO_CHUNK_SIZE):
-                chunk = mulaw_data[i : i + AUDIO_CHUNK_SIZE]
-                payload = base64.b64encode(chunk).decode("utf-8")
+                # チャンク送信（Twilioのバッファに合わせる）
+                for i in range(0, len(mulaw_data), AUDIO_CHUNK_SIZE):
+                    chunk = mulaw_data[i : i + AUDIO_CHUNK_SIZE]
+                    payload = base64.b64encode(chunk).decode("utf-8")
+                    await self.ws.send_json(
+                        {
+                            "event": "media",
+                            "streamSid": self.stream_sid,
+                            "media": {"payload": payload},
+                        }
+                    )
+                    await asyncio.sleep(0)  # 他タスクに制御を返す
+
+                # 音声送信完了をTwilioに通知
                 await self.ws.send_json(
                     {
-                        "event": "media",
+                        "event": "mark",
                         "streamSid": self.stream_sid,
-                        "media": {"payload": payload},
+                        "mark": {"name": "audio_end"},
                     }
                 )
-                await asyncio.sleep(0)  # 他タスクに制御を返す
 
-            # 音声送信完了をTwilioに通知
-            await self.ws.send_json(
-                {
-                    "event": "mark",
-                    "streamSid": self.stream_sid,
-                    "mark": {"name": "audio_end"},
-                }
-            )
-
-        except Exception as e:
-            logger.error(f"TTS エラー: {e}")
-        finally:
-            self.is_ai_speaking = False
+            except Exception as e:
+                logger.error(f"TTS エラー: {e}")
+            finally:
+                self.is_ai_speaking = False
 
     # ------------------------------------------------------------------ #
     #  Twilioの再生キューをクリア（割り込み対応用）                          #
