@@ -5,6 +5,7 @@ openai==1.51.0
 websockets==13.1
 httpx==0.27.2
 twilio==9.3.3
+python-multipart>=0.0.9  # Twilio Webhook の form データ解析に必要
 numpy>=1.26.4
 audioop-lts>=0.2.1; python_version >= "3.13"  # Python 3.13+ で audioop の代替（TBD-006対応）
 
