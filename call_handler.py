@@ -45,9 +45,9 @@ AUDIO_CHUNK_SIZE = 3200  # bytes (mulaw, 約200ms相当)
 # PERF-001: 会話履歴の最大保持ターン数
 MAX_HISTORY_TURNS = 10
 
-# センテンス分割: 文末文字で区切り、最初のセンテンスから順次 TTS に渡す
-_SENTENCE_END_RE = re.compile(r"(?<=[。！？\n])")
-_MIN_SENTENCE_LEN = 10  # これ未満は次の区切りまでバッファリング
+# センテンス分割: 文末文字・読点で区切り、最初のセンテンスから順次 TTS に渡す
+_SENTENCE_END_RE = re.compile(r"(?<=[。！？、\n])")
+_MIN_SENTENCE_LEN = 3  # これ未満は次の区切りまでバッファリング
 
 
 class CallSession:
@@ -128,17 +128,6 @@ class CallSession:
                 continue
 
             msg_type = data.get("type")
-            # デバッグ: Deepgram から受信した全メッセージをログ
-            if msg_type == "Results":
-                alt = data.get("channel", {}).get("alternatives", [{}])
-                txt = alt[0].get("transcript", "") if alt else ""
-                logger.info(
-                    f"Deepgram結果: type=Results is_final={data.get('is_final')} "
-                    f"speech_final={data.get('speech_final')} transcript='{txt}'"
-                )
-            else:
-                logger.info(f"Deepgram msg: type={msg_type}")
-
             if msg_type != "Results":
                 continue
 
@@ -165,6 +154,9 @@ class CallSession:
             if speech_final and transcript:
                 logger.info(f"ユーザー発話(確定): {transcript}")
                 self._barge_in_triggered = False
+                # AI 発話中なら即座に中断（バージイン + speech_final 同時対応）
+                if self.is_ai_speaking:
+                    await self._cancel_current_speak()
                 # 前の処理タスクをキャンセルして新しい処理を開始
                 if self._process_task and not self._process_task.done():
                     self._process_task.cancel()
@@ -220,6 +212,9 @@ class CallSession:
             full_response = await self._speak_task
 
         except asyncio.CancelledError:
+            # speak_task も確実にキャンセル
+            if self._speak_task and not self._speak_task.done():
+                self._speak_task.cancel()
             logger.info("処理タスクがキャンセルされました")
         except Exception as e:
             logger.error(f"LLM エラー: {e}")
