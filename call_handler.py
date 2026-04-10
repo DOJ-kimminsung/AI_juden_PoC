@@ -45,9 +45,10 @@ AUDIO_CHUNK_SIZE = 3200  # bytes (mulaw, 約200ms相当)
 # PERF-001: 会話履歴の最大保持ターン数
 MAX_HISTORY_TURNS = 10
 
-# センテンス分割: 文末文字・読点で区切り、最初のセンテンスから順次 TTS に渡す
-_SENTENCE_END_RE = re.compile(r"(?<=[。！？、\n])")
-_MIN_SENTENCE_LEN = 3  # これ未満は次の区切りまでバッファリング
+# センテンス分割: 文末文字で区切り、最初のセンテンスから順次 TTS に渡す
+_SENTENCE_END_RE = re.compile(r"(?<=[。！？\n])")
+_MIN_SENTENCE_LEN = 8  # これ未満は次の区切りまでバッファリング
+_FIRST_CHUNK_TIMEOUT = 0.5  # 最初のチャンクを送るまでの最大待機秒数
 
 
 class CallSession:
@@ -169,6 +170,8 @@ class CallSession:
     # ------------------------------------------------------------------ #
     async def _cancel_current_speak(self) -> None:
         """現在の発話タスクをキャンセルし、Twilio の再生キューをクリアする"""
+        # 即座に Twilio 再生を停止（タスク完了を待たない）
+        await self._clear_audio()
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
             try:
@@ -178,7 +181,6 @@ class CallSession:
                 )
             except asyncio.TimeoutError:
                 logger.warning("speak タスクのキャンセル待ちがタイムアウト")
-        await self._clear_audio()
         logger.info("AI 発話を中断し Twilio キューをクリアしました")
 
     # ------------------------------------------------------------------ #
@@ -228,6 +230,8 @@ class CallSession:
     async def _speak_streaming(self, stream) -> str:
         """
         LLM ストリームを受け取り、センテンス単位で TTS ストリーミング送信する。
+        最初のチャンクは _FIRST_CHUNK_TIMEOUT 秒以内に送信を開始し、
+        レイテンシを最小化する。
         Returns: 全文テキスト（会話履歴追加用）
         """
         if not self.stream_sid:
@@ -236,21 +240,42 @@ class CallSession:
         self.is_ai_speaking = True
         full_text = ""
         buf = ""
+        first_chunk_sent = False
+        first_token_time = None
 
         try:
             async for chunk in stream:
                 delta = chunk.choices[0].delta.content or ""
+                if not delta:
+                    continue
                 buf += delta
                 full_text += delta
 
+                if first_token_time is None:
+                    first_token_time = asyncio.get_event_loop().time()
+
                 # 文末文字で分割してセンテンスを順次 TTS へ
                 parts = _SENTENCE_END_RE.split(buf)
-                # 最後の要素は未完成の可能性があるので残す
-                for sentence in parts[:-1]:
-                    sentence = sentence.strip()
-                    if len(sentence) >= _MIN_SENTENCE_LEN:
-                        await self._tts_stream_send(sentence)
-                buf = parts[-1]
+                if len(parts) > 1:
+                    for sentence in parts[:-1]:
+                        sentence = sentence.strip()
+                        if len(sentence) >= _MIN_SENTENCE_LEN:
+                            await self._tts_stream_send(sentence)
+                            first_chunk_sent = True
+                    buf = parts[-1]
+
+                # 時間ベースフラッシュ: 最初のチャンク未送信で
+                # タイムアウトを超えたらバッファを即送信
+                if (
+                    not first_chunk_sent
+                    and first_token_time is not None
+                    and len(buf.strip()) >= 4
+                ):
+                    elapsed = asyncio.get_event_loop().time() - first_token_time
+                    if elapsed >= _FIRST_CHUNK_TIMEOUT:
+                        await self._tts_stream_send(buf.strip())
+                        buf = ""
+                        first_chunk_sent = True
 
             # LLM 終了後の残りバッファを処理
             if buf.strip():
