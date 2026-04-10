@@ -110,6 +110,7 @@ class CallSession:
                     try:
                         await self.deepgram_ws.send(audio_bytes)
                     except websockets.ConnectionClosed:
+                        logger.warning("Deepgram WS 切断のため media 転送を停止")
                         break
 
             elif event == "stop":
@@ -126,7 +127,19 @@ class CallSession:
             except json.JSONDecodeError:
                 continue
 
-            if data.get("type") != "Results":
+            msg_type = data.get("type")
+            # デバッグ: Deepgram から受信した全メッセージをログ
+            if msg_type == "Results":
+                alt = data.get("channel", {}).get("alternatives", [{}])
+                txt = alt[0].get("transcript", "") if alt else ""
+                logger.info(
+                    f"Deepgram結果: type=Results is_final={data.get('is_final')} "
+                    f"speech_final={data.get('speech_final')} transcript='{txt}'"
+                )
+            else:
+                logger.info(f"Deepgram msg: type={msg_type}")
+
+            if msg_type != "Results":
                 continue
 
             alternatives = data.get("channel", {}).get("alternatives", [])
