@@ -288,7 +288,7 @@ class CallSession:
                 response_format="pcm",  # raw PCM 24kHz 16bit mono
             ) as response:
                 ratecv_state = None
-                async for pcm_chunk in response.aiter_bytes(chunk_size=4096):
+                async for pcm_chunk in response.iter_bytes(chunk_size=4096):
                     mulaw_chunk, ratecv_state = pcm24k_to_mulaw8k_chunk(
                         pcm_chunk, ratecv_state
                     )

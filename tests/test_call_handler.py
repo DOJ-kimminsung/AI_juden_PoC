@@ -45,7 +45,7 @@ def _make_streaming_tts_response(pcm_chunks: list[bytes]):
                 raise StopAsyncIteration
 
     class _FakeStreamResponse:
-        async def aiter_bytes(self, chunk_size=4096):
+        async def iter_bytes(self, chunk_size=4096):
             for chunk in pcm_chunks:
                 yield chunk
 
